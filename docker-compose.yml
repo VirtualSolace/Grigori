@@ -1,0 +1,13 @@
+services:
+  web:
+    image: ubuntu:24.04
+    ports:
+      - "2222:22"
+      - "8080:80"
+      - "8443:443"
+    networks:
+      - default
+
+networks:
+  default:
+    driver: bridge
