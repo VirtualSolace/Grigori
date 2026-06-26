@@ -1,162 +1,184 @@
 #include "../headers/https.h"
 #include "../headers/info.h"
-#include "../headers/net.h"
 #include "../headers/debug.h"
-#include <openssl/ssl.h>
-#include <cstdlib>
-#include <vector>
+
+#include <curl/curl.h>
 #include <sstream>
+#include <vector>
 #include <format>
 
-Https::Https() : ssl(nullptr), ctx(nullptr) {}			// path(), host(), AT(), net {} {}
+Https::Https() : curl(nullptr) {
+  curl_global_init(CURL_GLOBAL_DEFAULT);
+}
 
-Https::~Https() = default;
+Https::~Https() {
+  teardown();
+  curl_global_cleanup();
+}
 
-int Https::httpsInit(const std::string& ip)     // int port
+int Https::httpsInit(const std::string& ip) {
+  path = ePath;
+  host = eHost;
+  AT   = eAT;
+
+  // Override DNS resolution with an IP:
+  serverIP = ip;
+
+  curl = curl_easy_init();
+  if (!curl)
+    return -1;
+
+  return 0;
+}
+
+int Https::teardown() {
+  if (curl) {
+    curl_easy_cleanup(curl);
+    curl = nullptr;
+  }
+
+  responseBuffer.clear();
+  return 0;
+}
+
+size_t Https::writeCallback(char* ptr,
+                            size_t size,
+                            size_t nmemb,
+                            void* userdata)
 {
-  path = ePath;   //utils::decryptor(ePath, ans, sizeof(ePath));
-  host = eHost;  //utils::decryptor(eHost, ans, sizeof(eHost));
-  AT = eAT;     //utils::decryptor(eAT, ans, sizeof(eAT));
+  std::string* buffer = static_cast<std::string*>(userdata);
+  buffer->append(ptr, size * nmemb);
 
-  int sock = init(ip, PORT);
-  if (sock < 0) return -1;
-
-  ctx = SSL_CTX_new(TLS_client_method());
-  if (!ctx)
-    return -1;
-
-  ssl = SSL_new(ctx);
-  if (!ssl) return -1;
-
-  SSL_set_fd(ssl, sock);
-
-  if (SSL_connect(ssl) <= 0)
-  {
-    teardown();
-    return -1;
-  }
-
-  return 0;
+  return size * nmemb;
 }
 
-int Https::teardown(){
-  if(ssl){
-    int result = SSL_shutdown(ssl);
-    if(result == 0) SSL_shutdown(ssl);
+int Https::sendRequest(const std::string& url,
+                       const std::string& method,
+                       const std::string& body,
+                       bool keepAlive)
+{
+  if (!curl)
+    return -1;
 
-    SSL_free(ssl);
-    ssl = nullptr;
+  responseBuffer.clear();
+
+  curl_easy_reset(curl);
+
+  struct curl_slist* headers = nullptr;
+
+  headers = curl_slist_append(
+    headers,
+    std::format("X-Access-Token: {}", AT).c_str());
+
+  headers = curl_slist_append(
+    headers,
+    "Content-Type: application/json");
+
+  headers = curl_slist_append(
+    headers,
+    keepAlive ? "Connection: keep-alive"
+    : "Connection: close");
+
+  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseBuffer);
+
+  // force DNS resolution
+  struct curl_slist* resolve = nullptr;
+  if (!serverIP.empty()) {
+    std::string mapping =
+    std::format("{}:{}:{}", host, PORT, serverIP);
+
+    resolve = curl_slist_append(resolve, mapping.c_str());
+    curl_easy_setopt(curl, CURLOPT_RESOLVE, resolve);
   }
 
-  if(ctx){
-    SSL_CTX_free(ctx);
-    ctx = nullptr;
+  if (method == "POST") {
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl,
+                     CURLOPT_POSTFIELDS,
+                     body.c_str());
+
+    curl_easy_setopt(curl,
+                     CURLOPT_POSTFIELDSIZE,
+                     body.size());
   }
+  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+  CURLcode result = curl_easy_perform(curl);
 
-  if(Net::teardown() < 0) return -1;
-  return 0;
-}
+  curl_slist_free_all(headers);
 
-int Https::sendData(const std::string& data){
-  if(ssl == nullptr) return -1;
+  if (resolve)
+    curl_slist_free_all(resolve);
 
-  size_t sent = 0;
+  if (result != CURLE_OK)
+    return -1;
 
-  while (sent < data.size()){
-    int bytes = SSL_write(ssl, data.data() + sent, data.size() - sent);
+  long responseCode = 0;
+  curl_easy_getinfo(curl,
+                    CURLINFO_RESPONSE_CODE,
+                    &responseCode);
 
-    if (bytes <= 0) return -1;
-
-    sent += bytes;
-  }
-
-  return 0;
+  return (responseCode >= 200 && responseCode < 300)
+  ? 0
+  : -1;
 }
 
 int Https::readResponse(std::string& response) {
-    if (!ssl) return -1;
-
-    char buffer[2048];
-    int bytes;
-
-    response.clear();
-
-    while ((bytes = SSL_read(ssl, buffer, sizeof(buffer) - 1)) > 0) {
-        buffer[bytes] = '\0';
-        response += buffer;
-    }
-
-    return 0;
+  response = responseBuffer;
+  return 0;
 }
 
-// =======================
-// std::vector<std::string> Https::recvData(){}
 std::vector<std::string> Https::recvData() {
-    std::vector<std::string> messages;
+  std::vector<std::string> messages;
 
-    std::string response;
-    if (readResponse(response) < 0)
-        return messages;
+  std::stringstream ss(responseBuffer);
+  std::string line;
 
-    size_t header_end = response.find("\r\n\r\n");
-    if (header_end == std::string::npos)
-        return messages;
+  while (std::getline(ss, line)) {
+    if (!line.empty())
+      messages.push_back(line);
+  }
 
-    std::string body = response.substr(header_end + 4);
-
-    std::stringstream ss(body);
-    std::string line;
-
-    while (std::getline(ss, line)) {
-        if (!line.empty())
-            messages.push_back(line);
-    }
-
-    return messages;
-}
-// ===========================
-
-
-int Https::craftPost(int i, int j, const std::string& postData) {
-  if (ssl == nullptr) return -1;
-
-  std::string request = std::format(
-    "POST {}?type={} HTTP/1.1\r\n"
-    "Host: {}\r\n"
-    "X-Access-Token: {}\r\n"
-    "Content-Type: application/json\r\n"
-    "Content-Length: {}\r\n"
-    "Connection: {}\r\n\r\n"
-    "{}",
-    path,
-    query[i],
-    host,
-    AT,
-    static_cast<unsigned long>(postData.size()),
-    conn_status[j],
-    postData
-  );
-
-  return sendData(request);
+  return messages;
 }
 
-int Https::craftGet(int i, int j){
+int Https::craftPost(int i, int j, const std::string& postData){
+  if (!curl) return -1;
 
-  std::size_t size = sizeof(query) / sizeof(query[0]);
-  if(ssl == nullptr) return -1;
-  if(i < 0 || static_cast<std::size_t>(i) >= size) return -1;
+  if (i < 0 || i >= (int)query.size()) return -1;
 
-  std::string request = std::format(
-    "GET {}?type={} HTTP/1.1\r\n"
-    "Host: {}\r\n"
-    "X-Access-Token: {}\r\n"
-    "Connection: {}\r\n\r\n",
-    path,
-    query[i],
+  if (j < CLOSE || j > KEEP_ALIVE) return -1;
+
+  bool keepAlive = (j == KEEP_ALIVE);
+
+  std::string url = std::format(
+    "https://{}:{}{}?type={}",
     host,
-    AT,
-    conn_status[j]
-  );
+    PORT,
+    path,
+    query.at(i));
 
-  return sendData(request);
+  return sendRequest(url, "POST", postData, keepAlive);
+}
+
+int Https::craftGet(int i, int j) {
+  if (!curl) return -1;
+
+  if (i < 0 || i >= (int)query.size())return -1;
+
+  if (j < CLOSE || j > KEEP_ALIVE) return -1;
+
+  bool keepAlive = (j == KEEP_ALIVE);
+
+  std::string url = std::format(
+    "https://{}:{}{}?type={}",
+    host,
+    PORT,
+    path,
+    query.at(i));
+
+  return sendRequest(url, "GET", "", keepAlive);
 }
