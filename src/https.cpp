@@ -41,10 +41,7 @@ int Https::teardown() {
   return 0;
 }
 
-size_t Https::writeCallback(char* ptr,
-                            size_t size,
-                            size_t nmemb,
-                            void* userdata)
+size_t Https::writeCallback(char* ptr, size_t size, size_t nmemb, void* userdata)
 {
   std::string* buffer = static_cast<std::string*>(userdata);
   buffer->append(ptr, size * nmemb);
@@ -52,13 +49,8 @@ size_t Https::writeCallback(char* ptr,
   return size * nmemb;
 }
 
-int Https::sendRequest(const std::string& url,
-                       const std::string& method,
-                       const std::string& body,
-                       bool keepAlive)
-{
-  if (!curl)
-    return -1;
+int Https::sendRequest(const std::string& url, const std::string& method, const std::string& body, bool keepAlive) {
+  if (!curl) return -1;
 
   responseBuffer.clear();
 
@@ -110,11 +102,9 @@ int Https::sendRequest(const std::string& url,
 
   curl_slist_free_all(headers);
 
-  if (resolve)
-    curl_slist_free_all(resolve);
+  if (resolve) curl_slist_free_all(resolve);
 
-  if (result != CURLE_OK)
-    return -1;
+  if (result != CURLE_OK) return -1;
 
   long responseCode = 0;
   curl_easy_getinfo(curl,
@@ -138,9 +128,7 @@ std::vector<std::string> Https::recvData() {
   std::string line;
 
   while (std::getline(ss, line)) {
-    if (!line.empty())
-      messages.push_back(line);
-  }
+    if (!line.empty()) messages.push_back(line);
 
   return messages;
 }
