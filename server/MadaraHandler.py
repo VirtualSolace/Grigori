@@ -15,9 +15,6 @@ ACCESS_TOKEN = os.getenv(
 
 ROUTE_PREFIX = "/godish"
 
-# Commands returned by ?type=orders
-COMMAND_QUEUE = []
-
 body = b"0"
 
 
@@ -80,13 +77,14 @@ class MadaraHandler(BaseHTTPRequestHandler):
 
         # Fetch commands
         if action == "orders":
-            body = "\n".join(COMMAND_QUEUE)
+            body = "\n".join(self.queue)
 
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", str(len(body.encode())))
             self.end_headers()
-
+            # print(self.queue)
+            # print(repr(body))
             self.wfile.write(body.encode())
             return
 
